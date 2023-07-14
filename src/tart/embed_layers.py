@@ -10,7 +10,7 @@ from .embed_utils import (
     get_embeds_stream_image,
 )
 
-from .tart_modules import TartEmbeddingLayerAC
+from .embed_base_classes import TartEmbeddingLayerAC
 
 from tqdm import tqdm
 from transformers import (

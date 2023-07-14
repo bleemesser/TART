@@ -15,6 +15,7 @@ from .tart_datasets import (
     DBPedia14,
     CIFAR10,
     YelpPolarity,
+    RedCaps,
 )
 
 
@@ -38,7 +39,7 @@ EMBEDDING_REGISTRY_AC = {
 }
 
 
-DOMAIN_REGISTRY = {"supported": ["text", "audio", "image"]}
+DOMAIN_REGISTRY = {"supported": ["text", "audio", "image", "multi_image_text"]}
 
 
 DATASET_REGISTRY = {
@@ -53,5 +54,8 @@ DATASET_REGISTRY = {
     "image": {
         "mnist": MNIST,
         "cifar10": CIFAR10,
+    },
+    "multi_image_text": {
+        "red_caps": RedCaps,
     },
 }

@@ -1,7 +1,12 @@
 import os
 import sys
-
-from datasets import concatenate_datasets, load_dataset
+from io import BytesIO
+from time import sleep
+import requests
+from PIL import Image
+import hashlib
+from tqdm import tqdm
+from datasets import concatenate_datasets, load_dataset, Dataset
 
 sys.path.append(f"{os.path.dirname(os.getcwd())}/")
 
@@ -100,11 +105,19 @@ class TartDataset(ABC):
                 )
                 .reset_index(drop=True)
             )
-
-            self.X_test, self.y_test = (
-                test_df_samples[self.input_key].tolist(),
-                test_df_samples["label"].tolist(),
-            )
+            if len(self.input_key) > 1:
+                self.X_test = list(
+                    zip(
+                        test_df_samples[self.input_key[0]].tolist(),
+                        test_df_samples[self.input_key[1]].tolist(),
+                    )  # TODO: generalize to more than 2 modalities
+                )
+                self.y_test = self.test_df["label"].tolist()
+            else:
+                self.X_test, self.y_test = (
+                    test_df_samples[self.input_key].tolist(),
+                    test_df_samples["label"].tolist(),
+                )
         return self.X_train, self.y_train, self.X_test, self.y_test
 
     def _prep_train_split(
@@ -915,5 +928,183 @@ class CIFAR10(TartDataset):
         y_train = self.train_df["label"]
         X_test = self.test_df[self.input_key]
         y_test = self.test_df["label"]
+
+        return X_train, y_train, X_test, y_test
+
+class RedCaps(TartDataset):
+    """Downloads the RedCaps dataset for TART eval. This dataset is multi-modal, with images and accompanying captions,
+    so we return an list of tuples of (text, image).
+    We evaluate against the 'blacksmith' and 'dogpictures' subreddits."""
+
+    _domain = "multi_text_image"
+    _hf_dataset_identifier = "red_caps"
+    _input_key = ["image", "caption"]  # ignored in return value
+
+    def __init__(
+        self,
+        total_train_samples: int,
+        k_range: List[int],
+        seed: int = 42,
+        pos_class: int = 0,  # 51 is id for subreddit r/blacksmith
+        neg_class: int = 1,  # 126 is id for subreddit r/dogpictures
+        cache_dir: str = None,
+        data_dir_path: str = None,
+        max_eval_samples: int = None,
+    ):
+        super().__init__(
+            total_train_samples,
+            k_range,
+            seed,
+            pos_class,
+            neg_class,
+            cache_dir,
+            data_dir_path,
+            max_eval_samples,
+        )
+
+        (
+            self.X_train,
+            self.y_train,
+            self.X_test,
+            self.y_test,
+        ) = self.prepare_train_test_split()
+
+    def _prep_train_split(self, total_train_samples, seed, k_range):
+        dataset_train_pos = self.train_df.loc[self.train_df["label"] == 1].sample(
+            frac=1, random_state=self.seed
+        )
+        dataset_train_pos.reset_index(drop=True, inplace=True)
+        dataset_train_neg = self.train_df.loc[self.train_df["label"] == 0].sample(
+            frac=1, random_state=self.seed
+        )
+        dataset_train_neg.reset_index(drop=True, inplace=True)
+        min_label_cnt = min(len(dataset_train_pos), len(dataset_train_neg))
+
+        assert (
+            k_range[-1] / 2 <= min_label_cnt
+        ), f"k_range[-1] is too large, values should be less than {min_label_cnt * 2}. Please change."
+
+        samples = []
+        total_sampled = 0
+        for k in self.k_range:
+            curr_k = k - total_sampled
+            total_sampled = k
+            indexes = list(
+                range(
+                    total_sampled, min(total_sampled + int(curr_k / 2), min_label_cnt)
+                )
+            )
+            k_samples_pos = dataset_train_pos.loc[indexes]
+            k_samples_neg = dataset_train_neg.loc[indexes]
+            # get second level index
+            samples += [k_samples_pos, k_samples_neg]
+
+        return pd.concat(samples)
+
+    def prepare_train_test_split(self):
+        if not self.data_dir:
+            print("Error: set data_dir_path to allow images to be downloaded.")
+        dataset_name = self.hf_dataset_identifier
+
+        # the cli tool for this dataset seems to be broken, so I'll just download the dataset manually
+        dataset_a = load_dataset(dataset_name, "blacksmith", cache_dir=self.cache_dir)
+        dataset_b = load_dataset(dataset_name, "dogpictures", cache_dir=self.cache_dir)
+
+        num_images_to_sample = 400
+
+        # randomly sample n images from each class
+        dataset = concatenate_datasets(
+            [
+                dataset_a["train"]
+                .shuffle(seed=self.seed)
+                .select(list(range(num_images_to_sample))),
+                dataset_b["train"]
+                .shuffle(seed=self.seed)
+                .select(list(range(num_images_to_sample))),
+            ]
+        )
+        dataset = dataset.to_pandas()
+
+        # replace the "subreddit" column with a label column
+        for i in range(len(dataset)):
+            if dataset["subreddit"][i] == 51:
+                dataset.at[i, "label"] = 0
+            elif dataset["subreddit"][i] == 126:
+                dataset.at[i, "label"] = 1
+            else:
+                dataset = dataset.drop(i)
+
+        def download_image(url: str, filepath: os.path, resize: int) -> Image:
+            """Download a single image from a url and save it to a filepath, resizing it if necessary."""
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            # check if file already exists
+            if os.path.exists(filepath):
+                with open(filepath, "rb") as f:
+                    img = Image.open(f).convert("L")
+            else:
+                sleep(1.5)  # be nice to the server
+                try:
+                    response = requests.get(url)
+                    if (
+                        response.status_code != 200 or "removed.png" in response.url
+                    ):  # taken from the cli tool
+                        return None
+                    img = Image.open(BytesIO(response.content)).convert("L")
+                    if resize:
+                        img = img.resize((resize, resize))
+                    img.save(filepath, "PNG")
+                except Exception as e:
+                    if isinstance(e, KeyboardInterrupt):
+                        raise e
+                    return None
+            return img
+
+        def download_images(dataset, resize: int) -> Dataset:
+            """Download all the images and add them to the dataset."""
+
+            dataset["image"] = None
+            print("Downloading RedCaps images (this may take a while)...)")
+            for i in tqdm(range(len(dataset))):
+                image = download_image(
+                    dataset["image_url"][i],
+                    f"{self.data_dir}/{dataset_name}/{hashlib.sha256(dataset['image_url'][i].encode()).hexdigest()}.png",
+                    resize=resize,
+                )
+                if image is not None and type(image) == type(Image.Image()):
+                    dataset.at[i, "image"] = image
+            return dataset
+
+        dataset = download_images(
+            dataset, resize=224
+        )  # 224x224 is the max size for the vit model - set to none to not resize
+        # the model will automatically resize the images to the correct size, but it's better for storage to do it here
+
+        # drop the rows where the image couldn't be downloaded
+        for i in range(len(dataset)):
+            if dataset["image"][i] is None:
+                dataset = dataset.drop(i)
+
+        # drop unnecessary columns
+        wanted_columns = ["image", "caption", "label"]
+        dataset = dataset[wanted_columns]
+
+        self.train_df, self.test_df = train_test_split(
+            dataset, test_size=0.75, random_state=self.seed
+        )
+        self.train_df = self._prep_train_split(
+            self.total_train_samples, self.seed, k_range=self.k_range
+        )
+
+        if self.data_dir:
+            self._save()
+
+        X_train = list(
+            zip(self.train_df["image"].tolist(), self.train_df["caption"].tolist())
+        )
+        y_train = self.train_df["label"].tolist()
+        X_test = list(
+            zip(self.test_df["image"].tolist(), self.test_df["caption"].tolist())
+        )
+        y_test = self.test_df["label"].tolist()
 
         return X_train, y_train, X_test, y_test
