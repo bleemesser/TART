@@ -18,6 +18,7 @@ class TartEmbedModule:
         num_pca_components: int = None,
         cache_dir: str = None,
         path_to_finetuned_embed_model=dict[str, str],
+        evaluate_modality_idx: int = None,
     ):
         """
         Provide a list of model names and embed methods, and a combination method to combine the embeddings. The model names must be as they appear in the registry.
@@ -57,6 +58,7 @@ class TartEmbedModule:
             for model, method in zip(self.model_names, self.embed_methods)
         ]
         self.combination_method = combination_method
+        self.evaluate_modality_idx = evaluate_modality_idx
 
     def combine_embeddings(
         self, embeddings: list[tuple[list[int]]]
@@ -171,34 +173,51 @@ class TartEmbedModule:
         num_modalities = len(self.model_names)
 
         # Generate embeddings for each modality, for both the test and train data
-        embeddings_raw = []
+        if self.evaluate_modality_idx is None:
+            embeddings_raw = []
+            for modality in range(num_modalities):
+                print(f"Embedding modality {modality}")
+                # Get the inputs for the modality
+                X_test_modality = [
+                    x[modality] if isinstance(x, tuple) else x for x in X_test
+                ]
+                X_train_modality = [
+                    x[modality] if isinstance(x, tuple) else x for x in X_train_subset
+                ]
 
-        for modality in range(num_modalities):
-            print(f"Embedding modality {modality}")
-            # Get the inputs for the modality
-            X_test_modality = [
-                x[modality] if isinstance(x, tuple) else x for x in X_test
+                # Get the embed method for the modality
+                embed_method = self.embed_methods[modality]
+
+                # Generate the embeddings for the modality
+                values = embed_method.embed(
+                    X_test=X_test_modality,
+                    X_train_subset=X_train_modality,
+                    y_train_subset=y_train_subset,
+                    y_test=y_test,
+                    k=k,
+                )
+                embeddings_raw.append(values)
+            print("Combining embeddings")
+            combined_embeddings = self.combine_embeddings(embeddings_raw)
+            return combined_embeddings
+        else:
+            x = [
+                x[self.evaluate_modality_idx] if isinstance(x, tuple) else x
+                for x in X_test
             ]
-            X_train_modality = [
-                x[modality] if isinstance(x, tuple) else x for x in X_train_subset
+            x_train = [
+                x[self.evaluate_modality_idx] if isinstance(x, tuple) else x
+                for x in X_train_subset
             ]
 
-            # Get the embed method for the modality
-            embed_method = self.embed_methods[modality]
+            embed_method = self.embed_methods[self.evaluate_modality_idx]
 
-            # Generate the embeddings for the modality
             values = embed_method.embed(
-                X_test=X_test_modality,
-                X_train_subset=X_train_modality,
+                X_test=x,
+                X_train_subset=x_train,
                 y_train_subset=y_train_subset,
                 y_test=y_test,
                 k=k,
             )
-            embeddings_raw.append(values)
-        print("Combining embeddings")
-        combined_embeddings = self.combine_embeddings(embeddings_raw)
-        # print(embeddings_raw[0])
-        # Combine the embeddings by the combination method (weighted average, multiplication, etc.)
-        # combined_embeddings = self.combine_embeddings(embeddings_raw)
 
-        return combined_embeddings
+            return values

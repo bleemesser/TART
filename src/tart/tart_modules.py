@@ -20,6 +20,7 @@ class Tart:
         num_pca_components: int = None,
         path_to_finetuned_embed_model: dict[str, str] = None,
         cache_dir: str = None,
+        evaluate_modality_idx: int = None,
     ):
         self.embed_method = embed_methods
         self.config = tart_head_config
@@ -37,6 +38,7 @@ class Tart:
             num_pca_components=num_pca_components,
             cache_dir=cache_dir,
             path_to_finetuned_embed_model=path_to_finetuned_embed_model,
+            evaluate_modality_idx=evaluate_modality_idx,
         )
         self._load_tart_head(path_to_pretrained_head, tart_head_config)
 
