@@ -58,7 +58,9 @@ class TartEmbedModule:
             for model, method in zip(self.model_names, self.embed_methods)
         ]
         self.combination_method = combination_method
+        assert self.combination_method in ["average", "truncate_concat", "multiply"], "combination_method must be one of 'average', 'truncate_concat', or 'multiply'"
         self.evaluate_modality_idx = evaluate_modality_idx
+        assert (evaluate_modality_idx is None) or (evaluate_modality_idx < len(self.model_names) and evaluate_modality_idx >= 0), "evaluate_modality_idx must be an integer between 0 and the number of modalities - 1"
 
     def combine_embeddings(
         self, embeddings: list[tuple[list[int]]]
@@ -127,7 +129,7 @@ class TartEmbedModule:
                 ],
                 dim=0,
             )
-            # if the output length is not divisible by the number of modalities, we add the remainder to the first modality
+            # if the output length is not divisible by the number of modalities, we add the remainder to the output from the first modality
             out_x_test = torch.cat(
                 [out_x_test, embeddings[0][0][: test_len % len(embeddings)]],
                 dim=0,
@@ -139,9 +141,6 @@ class TartEmbedModule:
                 ],
                 dim=0,
             )
-            # divide the output length by the number of modalities to get the length of each modality's output, then concatenate that many elements from each modality
-            print(embeddings[0][1].shape)
-            print(out_x_train_subset.shape)
 
         elif self.combination_method == "multiply":
             out_x_test = embeddings[0][0]
