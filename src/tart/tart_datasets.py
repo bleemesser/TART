@@ -931,6 +931,7 @@ class CIFAR10(TartDataset):
 
         return X_train, y_train, X_test, y_test
 
+
 class RedCaps(TartDataset):
     """Downloads the RedCaps dataset for TART eval. This dataset is multi-modal, with images and accompanying captions,
     so we return an list of tuples of (text, image).
@@ -1004,74 +1005,94 @@ class RedCaps(TartDataset):
     def prepare_train_test_split(self):
         if not self.data_dir:
             print("Error: set data_dir_path to allow images to be downloaded.")
+
         dataset_name = self.hf_dataset_identifier
 
-        # the cli tool for this dataset seems to be broken, so I'll just download the dataset manually
-        dataset_a = load_dataset(dataset_name, "blacksmith", cache_dir=self.cache_dir)
-        dataset_b = load_dataset(dataset_name, "dogpictures", cache_dir=self.cache_dir)
+        self.subset_names = ["blacksmith", "dogpictures"]
 
-        num_images_to_sample = 400
+        self.num_images_to_sample = 400
 
-        # randomly sample n images from each class
-        dataset = concatenate_datasets(
-            [
-                dataset_a["train"]
-                .shuffle(seed=self.seed)
-                .select(list(range(num_images_to_sample))),
-                dataset_b["train"]
-                .shuffle(seed=self.seed)
-                .select(list(range(num_images_to_sample))),
-            ]
-        )
-        dataset = dataset.to_pandas()
+        if os.path.exists(
+            os.path.join(
+                self.data_dir,
+                f"red_caps_{self.num_images_to_sample}_{self.seed}_{self.subset_names}.csv",
+            )
+        ):
+            dataset = pd.read_csv(
+                os.path.join(
+                    self.data_dir,
+                    f"red_caps_{self.num_images_to_sample}_{self.seed}_{self.subset_names}.csv",
+                )
+            )
+        else:
+            dataset_a = load_dataset(
+                dataset_name, self.subset_names[0], cache_dir=self.cache_dir
+            )
+            dataset_b = load_dataset(
+                dataset_name, self.subset_names[1], cache_dir=self.cache_dir
+            )
+            # randomly sample n images from each class
+            dataset = concatenate_datasets(
+                [
+                    dataset_a["train"]
+                    .shuffle(seed=self.seed)
+                    .select(list(range(self.num_images_to_sample))),
+                    dataset_b["train"]
+                    .shuffle(seed=self.seed)
+                    .select(list(range(self.num_images_to_sample))),
+                ]
+            )
+            dataset = dataset.to_pandas()
+            dataset["image"] = None
+            # replace the "subreddit" column with a label column
+            for i in range(len(dataset)):
+                if dataset["subreddit"][i] == 51:
+                    dataset.at[i, "label"] = 0
+                elif dataset["subreddit"][i] == 126:
+                    dataset.at[i, "label"] = 1
+                else:
+                    dataset = dataset.drop(i)
 
-        # replace the "subreddit" column with a label column
-        for i in range(len(dataset)):
-            if dataset["subreddit"][i] == 51:
-                dataset.at[i, "label"] = 0
-            elif dataset["subreddit"][i] == 126:
-                dataset.at[i, "label"] = 1
-            else:
-                dataset = dataset.drop(i)
+        def pil_to_base64(pil_image):
+            import base64
+            from io import BytesIO
 
-        def download_image(url: str, filepath: os.path, resize: int) -> Image:
-            """Download a single image from a url and save it to a filepath, resizing it if necessary."""
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            # check if file already exists
-            if os.path.exists(filepath):
-                with open(filepath, "rb") as f:
-                    img = Image.open(f).convert("L")
-            else:
-                sleep(1.5)  # be nice to the server
-                try:
-                    response = requests.get(url)
-                    if (
-                        response.status_code != 200 or "removed.png" in response.url
-                    ):  # taken from the cli tool
-                        return None
-                    img = Image.open(BytesIO(response.content)).convert("L")
-                    if resize:
-                        img = img.resize((resize, resize))
-                    img.save(filepath, "PNG")
-                except Exception as e:
-                    if isinstance(e, KeyboardInterrupt):
-                        raise e
-                    return None
-            return img
+            buffered = BytesIO()
+            pil_image.save(buffered, format="PNG")
+            buffered.seek(0)
+            img_str = base64.b64encode(buffered.getvalue())
+            return img_str
+
+        def base64_to_pil(img_str):
+            from io import BytesIO
+            import base64
+
+            return Image.open(BytesIO(base64.b64decode(img_str)))
 
         def download_images(dataset, resize: int) -> Dataset:
-            """Download all the images and add them to the dataset."""
-
-            dataset["image"] = None
-            print("Downloading RedCaps images (this may take a while)...)")
             for i in tqdm(range(len(dataset))):
-                image = download_image(
-                    dataset["image_url"][i],
-                    f"{self.data_dir}/{dataset_name}/{hashlib.sha256(dataset['image_url'][i].encode()).hexdigest()}.png",
-                    resize=resize,
-                )
-                if image is not None and type(image) == type(Image.Image()):
-                    dataset.at[i, "image"] = image
+                if dataset["image"][i] is None:
+                    sleep(0.5)
+                    try:
+                        response = requests.get(dataset["image_url"][i])
+                        if response.status_code != 200 or "removed.png" in response.url:
+                            continue
+                        img = Image.open(BytesIO(response.content)).convert("L")
+                        if resize:
+                            img = img.resize((resize, resize))
+
+                        img = pil_to_base64(img)
+                        dataset.at[i, "image"] = img
+                    except Exception as e:
+                        dataset.at[i, "image"] = None
+                        if isinstance(e, KeyboardInterrupt):
+                            raise e
+            to_drop = []
+            for i in range(len(dataset)):
+                if dataset["image"][i] is None:
+                    to_drop.append(i)
+            dataset = dataset.drop(to_drop)
+
             return dataset
 
         dataset = download_images(
@@ -1079,14 +1100,22 @@ class RedCaps(TartDataset):
         )  # 224x224 is the max size for the vit model - set to none to not resize
         # the model will automatically resize the images to the correct size, but it's better for storage to do it here
 
-        # drop the rows where the image couldn't be downloaded
-        for i in range(len(dataset)):
-            if dataset["image"][i] is None:
-                dataset = dataset.drop(i)
-
         # drop unnecessary columns
         wanted_columns = ["image", "caption", "label"]
         dataset = dataset[wanted_columns]
+        dataset.reset_index(drop=True, inplace=True)
+
+        dataset.to_csv(
+            os.path.join(
+                self.data_dir,
+                f"red_caps_{self.num_images_to_sample}_{self.seed}_{self.subset_names}.csv",
+            )
+        )
+
+        for i in range(len(dataset)):
+            dataset.at[i, "image"] = base64_to_pil(
+                dataset["image"][i][2:]
+            )  # the [2:] is to remove the b' at the start of the string which is added by pandas
 
         self.train_df, self.test_df = train_test_split(
             dataset, test_size=0.75, random_state=self.seed
